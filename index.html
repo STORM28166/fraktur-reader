@@ -123,7 +123,7 @@
   .word:active,.word:focus-visible{background:rgba(217,164,65,.45); outline:2px solid var(--gold2);}
   .word.lowconf{background:rgba(217,164,65,.02); outline:1px dashed rgba(217,164,65,.55); outline-offset:-1px;}
   .word.selected{background:rgba(217,164,65,.5); outline:2px solid var(--gold2);}
-  #fullText{
+  #fullText, #translatedText{
     margin-top:12px; background:var(--panel); border:1px solid var(--line);
     border-radius:16px; padding:16px; font-size:15px; line-height:1.8; white-space:pre-wrap;
   }
@@ -215,6 +215,8 @@
   <div id="pageView" class="hidden">
     <div class="page-toolbar">
       <span class="hint" id="pageHint">Tap any word on the page.</span>
+      <button class="btn-ghost" id="btnTranslate">&#127760; Translate page</button>
+      <button class="btn-ghost" id="btnDirection">DE &rarr; EN</button>
       <button class="btn-ghost" id="btnToggleText">Show full text</button>
       <button class="btn-ghost" id="btnRescan">Scan again</button>
     </div>
@@ -223,6 +225,16 @@
       <div id="overlay"></div>
     </div>
     <div id="fullText" class="hidden"></div>
+    <div id="translatePanel" class="hidden">
+      <div class="page-toolbar" style="margin-top:12px;">
+        <span class="hint" id="translateStatus">Translation</span>
+        <button class="btn-ghost on" id="tabTranslated">Translation</button>
+        <button class="btn-ghost" id="tabOriginal">Original</button>
+        <button class="btn-ghost" id="btnCopyTrans">Copy</button>
+        <button class="btn-ghost" id="btnHearTrans">&#128266; Hear it</button>
+      </div>
+      <div id="translatedText"></div>
+    </div>
   </div>
 
   <div id="historyPanel" class="hidden">
@@ -237,7 +249,7 @@
 </main>
 
 <footer>
-  Fraktur Reader v1 — photo OCR runs entirely on your device with Tesseract (Fraktur + German + English models). Definitions come from Wiktionary and dictionaryapi.dev. Old, faded or blurry pages may misread words — dashed outlines mark low-confidence words.
+  Fraktur Reader v1.2 — photo OCR runs entirely on your device with Tesseract (Fraktur + German + English models). Definitions come from Wiktionary and dictionaryapi.dev; full-page translation uses free MyMemory / Google / LibreTranslate services. Old, faded or blurry pages may misread words — dashed outlines mark low-confidence words.
 </footer>
 
 <div id="sheetWrap">
@@ -265,7 +277,7 @@ const state = {
   worker: null, workerReady: false, workerBusy: false,
   ocrW: 0, ocrH: 0, lastFile: null, lastWords: [],
   currentWord: null, currentLang: 'de', currentAudio: null,
-  showLowConf: true,
+  showLowConf: true, fullText: '', translation: null, transDir: 'de-en',
 };
 const LS_HIST = 'fr-history-v1', LS_BM = 'fr-bookmarks-v1';
 const loadJSON = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch(e){ return d; } };
@@ -385,6 +397,12 @@ function renderPage(imgUrl, fullText){
     overlay.appendChild(btn);
   });
   $('#fullText').textContent = fullText;
+  state.fullText = fullText;
+  state.translation = null;
+  $('#translatePanel').classList.add('hidden');
+  $('#translatedText').textContent = '';
+  state.transDir = detectDirection(fullText);
+  $('#btnDirection').innerHTML = state.transDir === 'de-en' ? 'DE &rarr; EN' : 'EN &rarr; DE';
   $('#pageView').classList.remove('hidden');
   $('#pageHint').textContent = state.lastWords.length + ' words found — tap any word.';
   $('#pageView').scrollIntoView({ behavior:'smooth', block:'start' });
@@ -401,6 +419,139 @@ $('#btnCamera').addEventListener('click', () => $('#fileCamera').click());
 $('#btnChoose').addEventListener('click', () => $('#fileChoose').click());
 $('#fileCamera').addEventListener('change', e => { const f = e.target.files[0]; if (f) scanFile(f); e.target.value=''; });
 $('#fileChoose').addEventListener('change', e => { const f = e.target.files[0]; if (f) scanFile(f); e.target.value=''; });
+
+/* ============================== full-page translation ============================== */
+const DE_WORDS = ['der','die','das','und','ist','ein','eine','von','zu','den','des','sich','mit','auf','für','nicht','es','im','in','einer','einem','als','auch','aus','bei','nach','wie','einen','eines','hat','war','wird','sein','sind','haben','ich','du','er','sie','wir','ihr','alle','noch','nur','schon','sehr','mehr','einer','kein','keine'];
+const EN_WORDS = ['the','and','is','of','to','in','that','it','was','for','on','are','as','with','they','be','at','this','from','have','or','had','by','not','but','what','all','were','when','your','can','said','there','use','each','which','she','do','how','their','will','about','if','up','out','many','then','them','these','so','some','her','would','make','like','him','into','time','has','look','two','more','go','see','no','way','could','people','my','than','first','been','call','who','its','now','find','long','down','day','did','get','come','made','may','part'];
+function detectDirection(text){
+  const words = (text || '').toLowerCase().match(/[a-zäöüß]+/g) || [];
+  let de = 0, en = 0;
+  for (const w of words){ if (DE_WORDS.includes(w)) de++; if (EN_WORDS.includes(w)) en++; }
+  return de >= en ? 'de-en' : 'en-de';
+}
+function chunkText(text, maxLen){
+  const flat = (text || '').replace(/\s+/g, ' ').trim();
+  if (!flat) return [];
+  const sentences = flat.match(/[^.!?]+[.!?]+["')\]]*\s*|[^.!?]+$/g) || [flat];
+  const chunks = [];
+  let cur = '';
+  for (const s of sentences){
+    if (cur && (cur + s).length > maxLen){ chunks.push(cur.trim()); cur = s; }
+    else cur += s;
+    if (cur.length > maxLen){ chunks.push(cur.trim()); cur = ''; }
+  }
+  if (cur.trim()) chunks.push(cur.trim());
+  return chunks.length ? chunks : [flat];
+}
+async function translateMyMemory(text, from, to){
+  const data = await fetchJSON('https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text) + '&langpair=' + from + '|' + to);
+  const t = data && data.responseData && data.responseData.translatedText;
+  if (!t || /MYMEMORY WARNING/i.test(t)) throw new Error('mymemory unavailable');
+  return t;
+}
+async function translateGtx(text, from, to){
+  const data = await fetchJSON('https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + from + '&tl=' + to + '&dt=t&q=' + encodeURIComponent(text));
+  if (!Array.isArray(data) || !Array.isArray(data[0])) throw new Error('gtx unavailable');
+  const out = data[0].map(p => (Array.isArray(p) ? (p[0] || '') : '')).join('');
+  if (!out.trim()) throw new Error('gtx empty');
+  return out;
+}
+async function translateLibre(text, from, to){
+  const r = await fetch('https://libretranslate.de/translate', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ q: text, source: from, target: to, format: 'text' })
+  });
+  if (!r.ok) throw new Error('libre unavailable');
+  const data = await r.json();
+  if (!data || !data.translatedText) throw new Error('libre empty');
+  return data.translatedText;
+}
+async function translateChunk(text, from, to){
+  const providers = [translateMyMemory, translateGtx, translateLibre];
+  let lastErr = null;
+  for (const p of providers){
+    try { return await p(text, from, to); } catch(e){ lastErr = e; }
+  }
+  throw lastErr || new Error('all translators failed');
+}
+function setTransTab(which){
+  $('#tabTranslated').classList.toggle('on', which === 'translated');
+  $('#tabOriginal').classList.toggle('on', which === 'original');
+  if (which === 'original'){
+    $('#translatedText').textContent = state.fullText;
+    $('#translateStatus').textContent = 'Original text';
+  } else {
+    $('#translatedText').textContent = state.translation ? state.translation.text : '';
+    if (state.translation) $('#translateStatus').textContent = 'Translated';
+  }
+}
+async function translatePage(){
+  const text = (state.fullText || '').trim();
+  if (!text){ toast('Scan a page first'); return; }
+  if (state.translation && state.translation.forText === state.fullText && state.translation.dir === state.transDir){
+    $('#translatePanel').classList.remove('hidden');
+    setTransTab('translated');
+    $('#translatePanel').scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
+  const parts = state.transDir.split('-');
+  const from = parts[0], to = parts[1];
+  const chunks = chunkText(text, 1200);
+  $('#translatePanel').classList.remove('hidden');
+  $('#translatedText').textContent = '';
+  setTransTab('translated');
+  try {
+    const out = [];
+    for (let i = 0; i < chunks.length; i++){
+      $('#translateStatus').textContent = 'Translating… ' + i + '/' + chunks.length;
+      out.push(await translateChunk(chunks[i], from, to));
+      $('#translateStatus').textContent = 'Translating… ' + (i + 1) + '/' + chunks.length;
+    }
+    const joined = out.join(' ');
+    state.translation = { forText: state.fullText, dir: state.transDir, text: joined };
+    $('#translatedText').textContent = joined;
+    $('#translateStatus').textContent = 'Translated (' + (from === 'de' ? 'German → English' : 'English → German') + ')';
+    $('#translatePanel').scrollIntoView({ behavior: 'smooth' });
+  } catch(err){
+    console.error(err);
+    $('#translateStatus').textContent = 'Translation failed';
+    $('#translatedText').textContent = 'The free translation services are rate-limited or blocked right now. Try again in a bit — or tap any word for its dictionary meaning instead.';
+  }
+}
+$('#btnTranslate').addEventListener('click', translatePage);
+$('#btnDirection').addEventListener('click', () => {
+  state.transDir = state.transDir === 'de-en' ? 'en-de' : 'de-en';
+  $('#btnDirection').innerHTML = state.transDir === 'de-en' ? 'DE &rarr; EN' : 'EN &rarr; DE';
+  state.translation = null;
+  toast(state.transDir === 'de-en' ? 'Translating German → English' : 'Translating English → German');
+});
+$('#tabTranslated').addEventListener('click', () => setTransTab('translated'));
+$('#tabOriginal').addEventListener('click', () => setTransTab('original'));
+$('#btnCopyTrans').addEventListener('click', async () => {
+  const t = $('#translatedText').textContent;
+  if (!t){ toast('Nothing to copy yet'); return; }
+  try { await navigator.clipboard.writeText(t); toast('Copied'); }
+  catch(e){
+    const ta = document.createElement('textarea');
+    ta.value = t; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); toast('Copied'); } catch(e2){ toast('Copy failed'); }
+    ta.remove();
+  }
+});
+$('#btnHearTrans').addEventListener('click', () => {
+  const t = $('#translatedText').textContent;
+  if (!t){ toast('Nothing to read yet'); return; }
+  if (!('speechSynthesis' in window)){ toast('Speech is not available on this device'); return; }
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(t.slice(0, 4000));
+  const showingOriginal = $('#tabOriginal').classList.contains('on');
+  const parts = state.transDir.split('-');
+  u.lang = showingOriginal ? (parts[0] === 'de' ? 'de-DE' : 'en-US') : (parts[1] === 'de' ? 'de-DE' : 'en-US');
+  const voices = window.speechSynthesis.getVoices();
+  const v = voices.find(v => v.lang && v.lang.toLowerCase().startsWith(u.lang.slice(0, 2)));
+  if (v) u.voice = v;
+  window.speechSynthesis.speak(u);
+});
 
 /* ============================== word lookup ============================== */
 function cleanWord(raw){
